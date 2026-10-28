@@ -1,8 +1,15 @@
-// src/App.jsx
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+} from 'react-router-dom';
+
 import { AuthProvider } from './context/AuthContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { Navbar } from './components/Navbar';
+
 import { Login } from './pages/Login';
 import { Dashboard } from './pages/Dashboard';
 import { CreateProject } from './pages/CreateProject';
@@ -13,22 +20,43 @@ export default function App() {
     <AuthProvider>
       <BrowserRouter>
         <Navbar />
+
         <Routes>
           <Route path="/login" element={<Login />} />
-          <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-          
-          {/* New Project Route for ADMIN and USER */}
-          <Route 
-            path="/projects/new" 
+
+          <Route
+            path="/dashboard"
             element={
-              <ProtectedRoute allowedRoles={['ADMIN', 'USER']}>
-                <CreateProject />
+              <ProtectedRoute>
+                <Dashboard />
               </ProtectedRoute>
-            } 
+            }
           />
-          
-          <Route path="/projects/:id" element={<ProtectedRoute><ProjectDetails /></ProtectedRoute>} />
-          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+
+         
+<Route
+  path="/projects/new"
+  element={
+    <ProtectedRoute allowedRoles={['admin', 'manager_teacher']}>
+      <CreateProject />
+    </ProtectedRoute>
+  }
+/>
+
+
+          <Route
+            path="/projects/:id"
+            element={
+              <ProtectedRoute>
+                <ProjectDetails />
+              </ProtectedRoute>
+            }
+          />
+
+          <Route
+            path="*"
+            element={<Navigate to="/dashboard" replace />}
+          />
         </Routes>
       </BrowserRouter>
     </AuthProvider>

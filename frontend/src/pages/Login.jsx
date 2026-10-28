@@ -1,61 +1,87 @@
-// src/pages/Login.jsx
+
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 export const Login = () => {
-  const [email, setEmail] = useState('');
-  const [role, setRole] = useState('USER'); // Default to Teacher (USER)
-  const { login } = useAuth();
+  const { user, loading, login } = useAuth();
   const navigate = useNavigate();
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    
-    // Assign specific IDs based on role for mock filtering
-    const mockUser = {
-      id: role === 'ADMIN' ? 'admin-001' : role === 'USER' ? 'teacher-123' : 'student-999',
-      email: email || `${role.toLowerCase()}@example.com`,
-      name: `Demo ${role}`,
-      role: role,
-    };
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
-    login(mockUser, 'mock-jwt-token-12345');
-    navigate('/dashboard');
+  if (loading) return <p>Loading account...</p>;
+  if (user) return <Navigate to="/dashboard" replace />;
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setError('');
+    setSubmitting(true);
+
+    try {
+      await login(email.trim(), password);
+      navigate('/dashboard', { replace: true });
+    } catch (err) {
+      setError(err.message || 'Unable to sign in.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
-    <div className="auth-wrapper">
-      <form onSubmit={handleSubmit} className="form-card">
-        <h2 style={{ textAlign: 'center', marginBottom: '24px' }}>Platform Login</h2>
+    <main className="mx-auto mt-12 max-w-md rounded-lg border p-6">
+      <h1 className="mb-2 text-2xl font-bold">Sign in</h1>
+      <p className="mb-6 text-gray-600">
+        Sign in to access your ranking projects.
+      </p>
 
-        <div className="form-group">
-          <label>Select Your Role</label>
-          <select 
-            value={role} 
-            onChange={(e) => setRole(e.target.value)}
-            style={{ width: '100%', padding: '10px', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}
-          >
-            <option value="USER">Teacher / Manager (USER)</option>
-            <option value="ADMIN">System Administrator (ADMIN)</option>
-            <option value="VIEWER">Student / Public (VIEWER)</option>
-          </select>
-        </div>
-
-        <div className="form-group">
-          <label>Email Address</label>
-          <input 
-            type="email" 
-            placeholder="e.g. teacher@example.com" 
-            value={email} 
-            onChange={(e) => setEmail(e.target.value)} 
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <label htmlFor="email" className="mb-1 block">
+            Email
+          </label>
+          <input
+            id="email"
+            type="email"
+            autoComplete="email"
+            required
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            className="w-full rounded border p-2"
           />
         </div>
 
-        <button type="submit" className="btn-primary" style={{ width: '100%', justifyContent: 'center', marginTop: '12px' }}>
-          Sign In as {role}
+        <div>
+          <label htmlFor="password" className="mb-1 block">
+            Password
+          </label>
+          <input
+            id="password"
+            type="password"
+            autoComplete="current-password"
+            required
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            className="w-full rounded border p-2"
+          />
+        </div>
+
+        {error && (
+          <p role="alert" className="text-sm text-red-600">
+            {error}
+          </p>
+        )}
+
+        <button
+          type="submit"
+          disabled={submitting}
+          className="w-full rounded bg-blue-600 p-2 text-white disabled:opacity-50"
+        >
+          {submitting ? 'Signing in...' : 'Sign in'}
         </button>
       </form>
-    </div>
+    </main>
   );
 };

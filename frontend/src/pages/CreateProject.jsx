@@ -1,187 +1,467 @@
-// src/pages/CreateProject.jsx
+
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Trash2, ArrowRight, ArrowLeft, CheckCircle } from 'lucide-react';
+import {
+  Plus,
+  Trash2,
+  ArrowRight,
+  ArrowLeft,
+  CheckCircle,
+} from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
+import { supabase } from '../lib/supabase';
+
+const makeCriterion = (name = '', weight = 0) => ({
+  id: crypto.randomUUID(),
+  name,
+  weight,
+  scoringDirection: 'higher',
+});
+
+const makeFieldKey = (name) => {
+  let key = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+  if (!key || !/^[a-z]/.test(key)) {
+    key = `field_${key}`;
+  }
+
+  return key;
+};
 
 export const CreateProject = () => {
   const navigate = useNavigate();
-  const [step, setStep] = useState(1);
+  const { user } = useAuth();
 
-  // Step 1 State: Basic Details
+  const [step, setStep] = useState(1);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [entityType, setEntityType] = useState('STUDENT');
+  const [category, setCategory] = useState('student');
 
-  // Step 2 State: Dynamic Criteria Fields
+  const [formulaType, setFormulaType] = useState('weighted_average');
+  const [sortDirection, setSortDirection] = useState('higher');
+  const [tieMethod, setTieMethod] = useState('competition');
+
   const [criteria, setCriteria] = useState([
-    { id: 1, name: 'Assignments Marks', code: 'ASSIGN', weight: 40, isHigherBetter: true },
-    { id: 2, name: 'Midterm Marks', code: 'MIDTERM', weight: 60, isHigherBetter: true },
+    makeCriterion('Assignments Marks', 40),
+    makeCriterion('Midterm Marks', 60),
   ]);
 
   const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
 
-  // Criteria Field Handlers
+  const totalWeight = criteria.reduce(
+    (sum, criterion) => sum + (Number(criterion.weight) || 0),
+    0
+  );
+
   const handleAddCriteria = () => {
-    setCriteria([
-      ...criteria,
-      { id: Date.now(), name: '', code: '', weight: 0, isHigherBetter: true },
-    ]);
+    setError('');
+    setCriteria((current) => [...current, makeCriterion()]);
   };
 
   const handleRemoveCriteria = (id) => {
-    if (criteria.length === 1) {
+    if (criteria.length <= 1) {
       setError('You must have at least one evaluation field.');
       return;
     }
-    setCriteria(criteria.filter((c) => c.id !== id));
+
+    setError('');
+    setCriteria((current) =>
+      current.filter((criterion) => criterion.id !== id)
+    );
   };
 
   const handleCriteriaChange = (id, field, value) => {
     setError('');
-    setCriteria(
-      criteria.map((c) => {
-        if (c.id === id) {
-          if (field === 'weight') return { ...c, weight: parseFloat(value) || 0 };
-          if (field === 'name') return { ...c, name: value, code: value.toUpperCase().replace(/\s+/g, '_') };
-          return { ...c, [field]: value };
+
+    setCriteria((current) =>
+      current.map((criterion) => {
+        if (criterion.id !== id) return criterion;
+
+        if (field === 'weight') {
+          return {
+            ...criterion,
+            weight: value === '' ? '' : Number(value),
+          };
         }
-        return c;
+
+        return { ...criterion, [field]: value };
       })
     );
   };
 
-  const totalWeight = criteria.reduce((sum, c) => sum + (c.weight || 0), 0);
+  const handleNextStep = (event) => {
+    event.preventDefault();
+    setError('');
 
-  const handleNextStep = (e) => {
-    e.preventDefault();
     if (!title.trim()) {
       setError('Project name is required.');
       return;
     }
-    setError('');
+
     setStep(2);
   };
 
-  const handleCreateProject = (e) => {
-    e.preventDefault();
+  const handleCreateProject = async (event) => {
+    event.preventDefault();
+    setError('');
 
-    if (totalWeight !== 100) {
-      setError(`Total weightage must equal exactly 100%. Currently it is ${totalWeight}%.`);
+    if (!user?.id) {
+      setError('Please sign in before creating a project.');
       return;
     }
 
-    // Save project into LocalStorage for persistent testing
-    const newProject = {
-      id: `proj-${Date.now()}`,
-      title,
-      description,
-      entityType,
-      criteria,
-      ownerId: 'teacher-123',
-      createdAt: new Date().toISOString(),
-    };
+    if (!['admin', 'manager_teacher'].includes(user.role)) {
+      setError('You do not have permission to create projects.');
+      return;
+    }
 
-    const existingProjects = JSON.parse(localStorage.getItem('custom_projects') || '[]');
-    localStorage.setItem('custom_projects', JSON.stringify([...existingProjects, newProject]));
+    if (!title.trim()) {
+      setError('Project name is required.');
+      setStep(1);
+      return;
+    }
 
-    navigate(`/projects/${newProject.id}`);
+    if (criteria.some((criterion) => !criterion.name.trim())) {
+      setError('Every evaluation field must have a name.');
+      return;
+    }
+
+    if (
+      criteria.some(
+        (criterion) =>
+          !Number.isFinite(Number(criterion.weight)) ||
+          Number(criterion.weight) <= 0 ||
+          Number(criterion.weight) > 100
+      )
+    ) {
+      setError('Every field weight must be greater than 0 and at most 100.');
+      return;
+    }
+
+    if (Math.abs(totalWeight - 100) > 0.000001) {
+      setError(`Total weight must equal 100%. Current total: ${totalWeight}%.`);
+      return;
+    }
+
+    const fieldKeys = criteria.map((criterion) =>
+      makeFieldKey(criterion.name)
+    );
+
+    if (new Set(fieldKeys).size !== fieldKeys.length) {
+      setError(
+        'Two field names produce the same field key. Please make their names different.'
+      );
+      return;
+    }
+
+    setSaving(true);
+    let createdProjectId = null;
+
+    try {
+      // Create the project as a draft.
+      const { data: project, error: projectError } = await supabase
+        .from('ranking_lists')
+        .insert({
+          title: title.trim(),
+          description: description.trim() || null,
+          category,
+          formula_type: formulaType,
+          sort_direction: sortDirection,
+          tie_method: tieMethod,
+          status: 'draft',
+          created_by: user.id,
+        })
+        .select('id')
+        .single();
+
+      if (projectError) throw projectError;
+
+      createdProjectId = project.id;
+
+      // Match the actual ranking_fields schema.
+      const fieldRows = criteria.map((criterion, index) => ({
+        ranking_list_id: createdProjectId,
+        field_key: fieldKeys[index],
+        label: criterion.name.trim(),
+        field_type: 'number',
+        is_required: true,
+        min_value: 0,
+        max_value: null,
+        weight: Number(criterion.weight),
+        include_in_ranking: true,
+        scoring_direction: criterion.scoringDirection,
+        sort_order: index + 1,
+      }));
+
+      const { error: fieldsError } = await supabase
+        .from('ranking_fields')
+        .insert(fieldRows);
+
+      if (fieldsError) {
+        // Best-effort cleanup if field creation fails.
+        const { error: cleanupError } = await supabase
+          .from('ranking_lists')
+          .delete()
+          .eq('id', createdProjectId);
+
+        if (cleanupError) {
+          console.error('Project cleanup failed:', cleanupError.message);
+        }
+
+        throw fieldsError;
+      }
+
+      navigate(`/projects/${createdProjectId}`);
+    } catch (err) {
+      setError(
+        err.message ||
+          'Could not create the project. Check your database permissions and schema.'
+      );
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <div className="page-container">
       <div style={{ maxWidth: '700px', margin: '0 auto' }}>
-        <h1 style={{ marginBottom: '8px' }}>Create New Ranking Workspace</h1>
+        <h1 style={{ marginBottom: '8px' }}>
+          Create New Ranking Workspace
+        </h1>
+
         <p style={{ color: 'var(--text-muted)', marginBottom: '24px' }}>
-          Step {step} of 2: {step === 1 ? 'Project Overview' : 'Define Evaluation Fields & Weightage'}
+          Step {step} of 2:{' '}
+          {step === 1
+            ? 'Project Overview'
+            : 'Evaluation Fields & Ranking Settings'}
         </p>
 
-        {error && <div className="error-banner">{error}</div>}
+        {error && (
+          <div className="error-banner" role="alert">
+            {error}
+          </div>
+        )}
 
-        {/* STEP 1: BASIC DETAILS FORM */}
         {step === 1 && (
-          <form onSubmit={handleNextStep} className="form-card" style={{ maxWidth: '100%' }}>
+          <form
+            onSubmit={handleNextStep}
+            className="form-card"
+            style={{ maxWidth: '100%' }}
+          >
             <div className="form-group">
-              <label>Ranking Project Name</label>
+              <label htmlFor="project-title">Ranking Project Name</label>
               <input
+                id="project-title"
                 type="text"
-                placeholder="e.g. Ranking Devops Team or CS-101 Final Grades"
+                placeholder="e.g. CS-101 Final Grades"
                 value={title}
-                onChange={(e) => setTitle(e.target.value)}
+                onChange={(event) => setTitle(event.target.value)}
+                maxLength={200}
                 required
               />
             </div>
 
             <div className="form-group">
-              <label>Description</label>
+              <label htmlFor="project-description">Description</label>
               <input
+                id="project-description"
                 type="text"
-                placeholder="e.g. Evaluated based on sprint performance and code review marks"
+                placeholder="Describe how participants will be evaluated"
                 value={description}
-                onChange={(e) => setDescription(e.target.value)}
+                onChange={(event) => setDescription(event.target.value)}
               />
             </div>
 
             <div className="form-group">
-              <label>Domain Entity Type</label>
+              <label htmlFor="project-category">Category</label>
               <select
-                value={entityType}
-                onChange={(e) => setEntityType(e.target.value)}
-                style={{ width: '100%', padding: '10px', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}
+                id="project-category"
+                value={category}
+                onChange={(event) => setCategory(event.target.value)}
+                required
               >
-                <option value="STUDENT">Student / Academic</option>
-                <option value="EMPLOYEE">Employee / Team Member</option>
-                <option value="VENDOR">Vendor / Supplier</option>
-                <option value="CUSTOM">Custom Entity</option>
+                <option value="student">Student / Academic</option>
+                <option value="employee">Employee / Team Member</option>
+                <option value="vendor">Vendor / Supplier</option>
+                <option value="custom">Custom Entity</option>
               </select>
             </div>
 
-            <button type="submit" className="btn-primary" style={{ width: '100%', justifyContent: 'center', marginTop: '16px' }}>
+            <button
+              type="submit"
+              className="btn-primary"
+              style={{
+                width: '100%',
+                justifyContent: 'center',
+                marginTop: '16px',
+              }}
+            >
               Next: Configure Fields <ArrowRight size={16} />
             </button>
           </form>
         )}
 
-        {/* STEP 2: DYNAMIC CRITERIA & WEIGHTAGE FORM */}
         {step === 2 && (
-          <form onSubmit={handleCreateProject} className="form-card" style={{ maxWidth: '100%' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-              <h3>Evaluation Fields & Weightage</h3>
-              <span style={{ fontWeight: 700, color: totalWeight === 100 ? '#059669' : '#e11d48' }}>
+          <form
+            onSubmit={handleCreateProject}
+            className="form-card"
+            style={{ maxWidth: '100%' }}
+          >
+            <h3>Ranking Formula & Settings</h3>
+
+            <div className="form-group">
+              <label htmlFor="formula-type">Calculation Formula</label>
+              <select
+                id="formula-type"
+                value={formulaType}
+                onChange={(event) => setFormulaType(event.target.value)}
+              >
+                <option value="weighted_average">Weighted Average</option>
+                <option value="sum">Sum</option>
+                <option value="average">Average</option>
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="sort-direction">Overall Ranking Direction</label>
+              <select
+                id="sort-direction"
+                value={sortDirection}
+                onChange={(event) => setSortDirection(event.target.value)}
+              >
+                <option value="higher">Higher total ranks first</option>
+                <option value="lower">Lower total ranks first</option>
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="tie-method">Tie Handling</label>
+              <select
+                id="tie-method"
+                value={tieMethod}
+                onChange={(event) => setTieMethod(event.target.value)}
+              >
+                <option value="competition">
+                  Competition (1, 1, 3)
+                </option>
+                <option value="dense">Dense (1, 1, 2)</option>
+                <option value="ordinal">Ordinal (1, 2, 3)</option>
+              </select>
+            </div>
+
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: '12px',
+                flexWrap: 'wrap',
+                marginBottom: '16px',
+              }}
+            >
+              <h3>Evaluation Fields &amp; Weightage</h3>
+
+              <span
+                style={{
+                  fontWeight: 700,
+                  color:
+                    Math.abs(totalWeight - 100) < 0.000001
+                      ? '#059669'
+                      : '#e11d48',
+                }}
+              >
                 Total Weight: {totalWeight}% / 100%
               </span>
             </div>
 
-            {criteria.map((c, idx) => (
-              <div key={c.id} style={{ display: 'flex', gap: '12px', alignItems: 'center', marginBottom: '12px' }}>
-                <div style={{ flex: 2 }}>
+            {criteria.map((criterion, index) => (
+              <div
+                key={criterion.id}
+                style={{
+                  display: 'flex',
+                  gap: '12px',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  marginBottom: '16px',
+                }}
+              >
+                <div style={{ flex: '2 1 180px' }}>
+                  <label htmlFor={`field-name-${criterion.id}`}>
+                    Field {index + 1}
+                  </label>
                   <input
+                    id={`field-name-${criterion.id}`}
                     type="text"
-                    placeholder={`Field Name ${idx + 1} (e.g. Midterm Marks)`}
-                    value={c.name}
-                    onChange={(e) => handleCriteriaChange(c.id, 'name', e.target.value)}
+                    placeholder="e.g. Midterm Marks"
+                    value={criterion.name}
+                    onChange={(event) =>
+                      handleCriteriaChange(
+                        criterion.id,
+                        'name',
+                        event.target.value
+                      )
+                    }
                     required
-                    style={{ width: '100%', padding: '8px', border: '1px solid var(--border)', borderRadius: 'var(--radius)' }}
+                    style={{ width: '100%' }}
                   />
                 </div>
 
-                <div style={{ flex: 1 }}>
+                <div style={{ flex: '1 1 100px' }}>
+                  <label htmlFor={`field-weight-${criterion.id}`}>
+                    Weight (%)
+                  </label>
                   <input
+                    id={`field-weight-${criterion.id}`}
                     type="number"
-                    placeholder="Weight %"
-                    min="1"
+                    min="0.01"
                     max="100"
-                    value={c.weight || ''}
-                    onChange={(e) => handleCriteriaChange(c.id, 'weight', e.target.value)}
+                    step="any"
+                    value={criterion.weight}
+                    onChange={(event) =>
+                      handleCriteriaChange(
+                        criterion.id,
+                        'weight',
+                        event.target.value
+                      )
+                    }
                     required
-                    style={{ width: '100%', padding: '8px', border: '1px solid var(--border)', borderRadius: 'var(--radius)' }}
+                    style={{ width: '100%' }}
                   />
+                </div>
+
+                <div style={{ flex: '1 1 150px' }}>
+                  <label htmlFor={`field-direction-${criterion.id}`}>
+                    Best result
+                  </label>
+                  <select
+                    id={`field-direction-${criterion.id}`}
+                    value={criterion.scoringDirection}
+                    onChange={(event) =>
+                      handleCriteriaChange(
+                        criterion.id,
+                        'scoringDirection',
+                        event.target.value
+                      )
+                    }
+                    style={{ width: '100%' }}
+                  >
+                    <option value="higher">Higher is better</option>
+                    <option value="lower">Lower is better</option>
+                  </select>
                 </div>
 
                 <button
                   type="button"
-                  onClick={() => handleRemoveCriteria(c.id)}
+                  onClick={() => handleRemoveCriteria(criterion.id)}
                   className="btn-danger"
-                  style={{ padding: '8px' }}
+                  aria-label={`Remove ${criterion.name || `field ${index + 1}`}`}
+                  title="Remove field"
+                  style={{ padding: '8px', marginTop: '22px' }}
                 >
                   <Trash2 size={18} />
                 </button>
@@ -209,10 +489,19 @@ export const CreateProject = () => {
               <Plus size={16} /> Add Another Metric Column
             </button>
 
+            <p style={{ color: 'var(--text-muted)', marginBottom: '16px' }}>
+              This project will be saved as a draft. You can publish it after
+              its fields and results have been checked.
+            </p>
+
             <div style={{ display: 'flex', gap: '12px' }}>
               <button
                 type="button"
-                onClick={() => setStep(1)}
+                onClick={() => {
+                  setError('');
+                  setStep(1);
+                }}
+                disabled={saving}
                 style={{
                   background: 'transparent',
                   border: '1px solid var(--border)',
@@ -230,10 +519,11 @@ export const CreateProject = () => {
               <button
                 type="submit"
                 className="btn-primary"
-                disabled={totalWeight !== 100}
+                disabled={saving || Math.abs(totalWeight - 100) > 0.000001}
                 style={{ flex: 1, justifyContent: 'center' }}
               >
-                <CheckCircle size={16} /> Complete Project Setup
+                <CheckCircle size={16} />
+                {saving ? 'Saving Project...' : 'Create Draft Project'}
               </button>
             </div>
           </form>
